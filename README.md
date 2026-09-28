@@ -37,9 +37,16 @@ uv run volleyball-trim path/to/game.mp4 -o rallies.mp4
 # YouTube URL
 uv run volleyball-trim "https://www.youtube.com/watch?v=VIDEO_ID" -o rallies.mp4
 
-# If YouTube blocks the download (bot check), reuse your browser cookies:
+# If YouTube blocks the download (bot check), reuse your browser cookies.
+# Fully quit Chrome first — an open Chrome locks the cookie DB and often
+# leads to "Requested format is not available".
 uv run volleyball-trim "https://youtu.be/VIDEO_ID" -o rallies.mp4 --cookies-from-browser chrome
+
+# Or pass an exported Netscape cookies.txt (works while Chrome stays open):
+uv run volleyball-trim "https://youtu.be/VIDEO_ID" -o rallies.mp4 --cookies cookies.txt
 ```
+
+If Chrome cookies still fail with **Requested format is not available**, quit Chrome completely and retry, or upload/pass a `cookies.txt`. Having [Deno](https://deno.land) or Node.js installed also helps yt-dlp solve YouTube’s player JS.
 
 Useful flags:
 
