@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -49,15 +50,50 @@ def is_youtube_url(value: str | Path) -> bool:
     )
 
 
-def _format_selector(max_height: int) -> str:
-    """Prefer ≤max_height mp4, but always fall back to whatever yt-dlp can get."""
-    return (
-        f"bv*[height<=?{max_height}][ext=mp4]+ba[ext=m4a]/"
-        f"b[height<=?{max_height}][ext=mp4]/"
-        f"bv*[height<=?{max_height}]+ba/"
-        f"b[height<=?{max_height}]/"
-        f"bv*+ba/b"
+def _find_js_runtimes() -> dict[str, dict[str, str]]:
+    """Enable deno/node so yt-dlp can resolve modern YouTube player JS."""
+    runtimes: dict[str, dict[str, str]] = {}
+    candidates = {
+        "deno": [
+            shutil.which("deno"),
+            str(Path.home() / ".deno" / "bin" / "deno"),
+        ],
+        "node": [
+            shutil.which("node"),
+            "/exec-daemon/node",
+            "/usr/local/bin/node",
+            "/usr/bin/node",
+        ],
+    }
+    for name, paths in candidates.items():
+        for raw in paths:
+            if not raw:
+                continue
+            path = Path(raw)
+            if path.is_file():
+                runtimes[name] = {"path": str(path)}
+                break
+        else:
+            # Still declare the runtime so yt-dlp searches PATH itself.
+            runtimes[name] = {}
+    return runtimes
+
+
+def _pick_downloaded_file(out_dir: Path, prepared: str) -> Path:
+    candidate = Path(prepared)
+    if candidate.is_file():
+        return candidate.resolve()
+    mp4 = candidate.with_suffix(".mp4")
+    if mp4.is_file():
+        return mp4.resolve()
+    files = sorted(
+        (f for f in out_dir.iterdir() if f.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
     )
+    if not files:
+        raise RuntimeError(f"Download finished but no file found in {out_dir}")
+    return files[0].resolve()
 
 
 def download_video(
@@ -70,11 +106,12 @@ def download_video(
 ) -> Path:
     """Download a video URL to dest_dir and return the local file path.
 
-    Prefers an mp4 mux under max_height when available so OpenCV/ffmpeg
-    can read it without exotic codecs; falls back to best available.
+    Prefers an mp4 under max_height when available; falls back aggressively
+    so unusual YouTube format sets still download.
 
-    If YouTube asks to "Sign in to confirm you're not a bot", pass browser
+    If YouTube asks to "Sign in to confirm you’re not a bot", pass browser
     cookies via cookies_from_browser (e.g. "chrome") or cookies_file.
+    Close Chrome fully before using cookies-from-browser on some systems.
     """
     try:
         from yt_dlp import YoutubeDL
@@ -94,45 +131,75 @@ def download_video(
         out_dir.mkdir(parents=True, exist_ok=True)
 
     outtmpl = str(out_dir / "%(title).80B [%(id)s].%(ext)s")
-    has_cookies = bool(cookies_from_browser or cookies_file)
-
-    opts: dict = {
-        "format": _format_selector(max_height),
-        # Prefer h264/mp4 when several formats match, without failing hard.
-        "format_sort": [f"res:{max_height}", "vcodec:h264", "acodec:m4a", "ext:mp4:m4a"],
-        "outtmpl": outtmpl,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "merge_output_format": "mp4",
-        "restrictfilenames": True,
-    }
-    # Cookies pair best with the web client; otherwise try mobile clients too.
-    if has_cookies:
-        opts["extractor_args"] = {"youtube": {"player_client": ["web", "android"]}}
-    else:
-        opts["extractor_args"] = {
-            "youtube": {"player_client": ["android", "ios", "web"]},
-        }
-
-    if cookies_from_browser:
-        opts["cookiesfrombrowser"] = (cookies_from_browser.strip().lower(),)
+    browser = (cookies_from_browser or "").strip().lower() or None
+    cookie_path: Path | None = None
     if cookies_file:
         cookie_path = Path(cookies_file)
         if not cookie_path.is_file():
             raise FileNotFoundError(f"Cookies file not found: {cookie_path}")
-        opts["cookiefile"] = str(cookie_path)
+        # Prefer an explicit cookies file over a live browser DB (avoids lock issues).
+        browser = None
+    has_cookies = bool(browser or cookie_path)
+    js_runtimes = _find_js_runtimes()
 
-    last_error: Exception | None = None
-    # First try preferred formats; on "format not available" retry with absolute best.
-    attempts = [
-        opts,
-        {**opts, "format": "bv*+ba/b", "format_sort": ["res", "br"]},
+    base: dict = {
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 5,
+        "fragment_retries": 5,
+        "restrictfilenames": True,
+        "js_runtimes": js_runtimes,
+        # Allow yt-dlp to fetch the external JS challenge solver when needed.
+        "remote_components": ["ejs:github"],
+    }
+    if browser:
+        # chrome / chrome:Default / chrome:Profile 1 are all valid.
+        base["cookiesfrombrowser"] = (browser,)
+    if cookie_path is not None:
+        base["cookiefile"] = str(cookie_path)
+
+    # Progressive attempts: simple formats first, then strip client restrictions.
+    # Cookies work most reliably with the default / web clients — not android-only.
+    # An empty format list usually means the wrong player client or missing JS runtime.
+    attempts: list[dict] = [
+        {
+            **base,
+            "format": f"bv*[height<=?{max_height}]+ba/b[height<=?{max_height}]/bv*+ba/b",
+            "format_sort": [f"res:{max_height}", "vcodec:h264", "acodec:m4a"],
+            "merge_output_format": "mp4",
+            "extractor_args": (
+                {"youtube": {"player_client": ["web", "web_safari"]}}
+                if has_cookies
+                else {"youtube": {"player_client": ["android", "ios", "web"]}}
+            ),
+        },
+        {
+            **base,
+            "format": "bestvideo*+bestaudio/best",
+            "merge_output_format": "mp4",
+            "extractor_args": {"youtube": {"player_client": ["web"]}} if has_cookies else {},
+        },
+        {
+            **base,
+            "format": "best",
+            "extractor_args": {
+                "youtube": {"player_client": ["web", "mweb", "tv", "web_safari"]}
+            },
+        },
+        {
+            **base,
+            "format": "best*",
+            # Last resort: let yt-dlp pick its own client defaults.
+        },
     ]
 
+    last_error: Exception | None = None
     for attempt_opts in attempts:
+        # Drop empty extractor_args so yt-dlp uses its defaults.
+        if not attempt_opts.get("extractor_args"):
+            attempt_opts = {k: v for k, v in attempt_opts.items() if k != "extractor_args"}
         try:
             with YoutubeDL(attempt_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -144,28 +211,16 @@ def download_video(
                         raise RuntimeError(f"No video found at URL: {url}")
                     info = entries[0]
                 prepared = ydl.prepare_filename(info)
-                candidate = Path(prepared)
-                if not candidate.is_file():
-                    mp4 = candidate.with_suffix(".mp4")
-                    if mp4.is_file():
-                        candidate = mp4
-                    else:
-                        files = sorted(
-                            (f for f in out_dir.iterdir() if f.is_file()),
-                            key=lambda p: p.stat().st_mtime,
-                            reverse=True,
-                        )
-                        if not files:
-                            raise RuntimeError(
-                                f"Download finished but no file found for: {url}"
-                            )
-                        candidate = files[0]
-                return candidate.resolve()
+                return _pick_downloaded_file(out_dir, prepared)
         except Exception as exc:
             last_error = exc
             msg = _clean_error(str(exc))
-            # Retry once when the preferred format set isn't offered for this video.
-            if "Requested format is not available" in msg and attempt_opts is attempts[0]:
+            retryable = (
+                "Requested format is not available" in msg
+                or "Only images are available" in msg
+                or "No video formats" in msg
+            )
+            if retryable:
                 continue
             break
 
@@ -174,16 +229,20 @@ def download_video(
     if "Sign in to confirm" in msg or "not a bot" in msg.lower():
         raise RuntimeError(
             "YouTube blocked the download (bot check). "
-            "Pass browser cookies, e.g. "
-            "`--cookies-from-browser chrome` "
-            "or export cookies to a file and use `--cookies cookies.txt`. "
+            "Select Chrome cookies in the UI (fully quit Chrome first), "
+            "or export a cookies.txt and upload it. "
             f"Details: {msg}"
         ) from last_error
-    if "Requested format is not available" in msg:
+    if (
+        "Requested format is not available" in msg
+        or "No video formats" in msg
+        or "Only images are available" in msg
+    ):
         raise RuntimeError(
-            "YouTube did not offer a usable video format for this link. "
-            "Try again with `--cookies-from-browser chrome`, or download "
-            "the file manually and upload it instead. "
+            "YouTube did not return any downloadable video streams for this link. "
+            "Try: (1) fully quit Chrome, then select Chrome cookies again; "
+            "(2) install Deno (https://deno.land) or Node.js so yt-dlp can solve "
+            "YouTube's player JS; or (3) download the MP4 in your browser and upload it. "
             f"Details: {msg}"
         ) from last_error
     raise RuntimeError(f"Download failed: {msg}") from last_error
