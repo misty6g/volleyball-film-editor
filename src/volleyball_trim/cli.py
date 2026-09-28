@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--port",
         type=int,
         default=8765,
-        help="Port for --ui (default: 8765)",
+        help="Preferred port for --ui (default: 8765; auto-picks the next free port if busy)",
     )
     p.add_argument(
         "--cookies-from-browser",
