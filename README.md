@@ -1,8 +1,8 @@
 # Rally Cut
 
-Trim the downtime between volleyball serves. Point it at a game film; it keeps the rallies and stitches them into a shorter watchable file.
+Trim the downtime between volleyball serves. Point it at a game film — or paste a YouTube link — and it keeps the rallies while cutting standing-around time between points.
 
-It scores **residual motion** (player/ball movement after removing camera pans), finds high-activity stretches, pads a little for the serve toss, and exports one MP4 with ffmpeg.
+It scores **residual motion** (player/ball movement after removing camera pans), finds high-activity stretches, pads a little for the serve toss, and exports one MP4 with ffmpeg. YouTube (and similar) links are downloaded with [yt-dlp](https://github.com/yt-dlp/yt-dlp) before trimming.
 
 ## Requirements
 
@@ -19,7 +19,7 @@ uv sync
 uv run volleyball-trim --ui
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765), upload a game video, click **Trim downtime**.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Upload a game video **or** paste a YouTube link, then click **Trim downtime**.
 
 Or with pip:
 
@@ -31,7 +31,14 @@ python -m volleyball_trim.cli --ui
 ### CLI
 
 ```bash
+# Local file
 uv run volleyball-trim path/to/game.mp4 -o rallies.mp4
+
+# YouTube URL
+uv run volleyball-trim "https://www.youtube.com/watch?v=VIDEO_ID" -o rallies.mp4
+
+# If YouTube blocks the download (bot check), reuse your browser cookies:
+uv run volleyball-trim "https://youtu.be/VIDEO_ID" -o rallies.mp4 --cookies-from-browser chrome
 ```
 
 Useful flags:
@@ -41,17 +48,20 @@ Useful flags:
 | `--sensitivity 0.7` | Keep more footage (raise if rallies get clipped) |
 | `--pad-before 1.5` | Seconds kept before each rally for the serve toss |
 | `--pad-after 1.0` | Seconds kept after each rally |
+| `--cookies-from-browser chrome` | Use browser cookies for YouTube downloads |
+| `--cookies cookies.txt` | Netscape cookies file for YouTube |
 | `--dry-run` | Print detected segments without writing video |
 | `--edl segments.csv` | Also write a CSV of kept ranges |
 | `--ui` | Launch the web UI |
 
 ## How it works
 
-1. Sample frames a few times per second.
-2. Estimate camera translation and score the leftover motion.
-3. Treat stretches above an adaptive threshold as rallies.
-4. Merge nearby bursts, drop tiny blips, pad for serve/point end.
-5. Concatenate kept clips with ffmpeg (`libx264`).
+1. If the input is a URL, download it with yt-dlp (mp4 preferred, ≤1080p).
+2. Sample frames a few times per second.
+3. Estimate camera translation and score the leftover motion.
+4. Treat stretches above an adaptive threshold as rallies.
+5. Merge nearby bursts, drop tiny blips, pad for serve/point end.
+6. Concatenate kept clips with ffmpeg (`libx264`).
 
 Best results: **sideline or end-line film** with a mostly steady camera. Heavy zooming, scoreboard overlays that animate constantly, or very shaky handheld footage may need a higher sensitivity.
 
@@ -67,6 +77,7 @@ uv run pytest
 
 ```
 src/volleyball_trim/
+  download.py   # YouTube / URL download (yt-dlp)
   detect.py     # motion / rally detection
   trim.py       # ffmpeg export
   pipeline.py   # detect → export
