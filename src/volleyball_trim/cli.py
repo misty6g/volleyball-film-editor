@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 from volleyball_trim.detect import DetectOptions
+from volleyball_trim.download import looks_like_url, resolve_input
 from volleyball_trim.pipeline import process_and_report
 
 
@@ -15,15 +17,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="volleyball-trim",
         description=(
             "Trim downtime between volleyball serves. "
-            "Keeps rallies (high residual motion) and drops standing/reset time."
+            "Keeps rallies (high residual motion) and drops standing/reset time. "
+            "Accepts a local video file or a YouTube URL."
         ),
     )
     p.add_argument(
         "input",
-        type=Path,
+        type=str,
         nargs="?",
         default=None,
-        help="Path to game film (mp4, mov, mkv, …). Omit when using --ui.",
+        help="Path to game film, or a YouTube URL. Omit when using --ui.",
     )
     p.add_argument(
         "-o",
@@ -90,6 +93,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=8765,
         help="Port for --ui (default: 8765)",
     )
+    p.add_argument(
+        "--cookies-from-browser",
+        type=str,
+        default=None,
+        metavar="BROWSER",
+        help="Browser to read YouTube cookies from (chrome, firefox, edge, …)",
+    )
+    p.add_argument(
+        "--cookies",
+        type=Path,
+        default=None,
+        help="Netscape cookies.txt for YouTube downloads (if bot-checked)",
+    )
     return p
 
 
@@ -104,16 +120,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.input is None:
-        print("error: input video required (or pass --ui)", file=sys.stderr)
+        print("error: input video or YouTube URL required (or pass --ui)", file=sys.stderr)
         return 1
 
-    if not args.input.exists():
-        print(f"error: video not found: {args.input}", file=sys.stderr)
+    download_dir: Path | None = None
+    try:
+        if looks_like_url(args.input):
+            download_dir = Path(tempfile.mkdtemp(prefix="vb-yt-cli-"))
+            print(f"Downloading {args.input} …", file=sys.stderr)
+            src = resolve_input(
+                args.input,
+                download_dir=download_dir,
+                cookies_from_browser=args.cookies_from_browser,
+                cookies_file=args.cookies,
+            )
+            print(f"Downloaded: {src}", file=sys.stderr)
+        else:
+            src = resolve_input(args.input)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     output = args.output
     if output is None:
-        output = args.input.with_name(f"{args.input.stem}_rallies.mp4")
+        output = src.with_name(f"{src.stem}_rallies.mp4")
 
     options = DetectOptions(
         sample_fps=args.sample_fps,
@@ -126,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         report = process_and_report(
-            args.input,
+            src,
             output,
             options=options,
             edl_path=args.edl,

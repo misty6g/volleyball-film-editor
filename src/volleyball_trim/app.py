@@ -8,6 +8,7 @@ from pathlib import Path
 import gradio as gr
 
 from volleyball_trim.detect import DetectOptions, summarize_result
+from volleyball_trim.download import looks_like_url, resolve_input
 from volleyball_trim.pipeline import process_video
 
 
@@ -44,6 +45,8 @@ CUSTOM_CSS = """
 
 def _process(
     video,
+    youtube_url: str,
+    cookies_browser: str,
     sensitivity: float,
     pad_before: float,
     pad_after: float,
@@ -51,14 +54,30 @@ def _process(
     merge_gap: float,
     progress=gr.Progress(track_tqdm=False),
 ):
-    if video is None:
-        raise gr.Error("Upload a volleyball game video first.")
+    url = (youtube_url or "").strip()
+    out_dir = Path(tempfile.mkdtemp(prefix="vb-trim-ui-"))
+    browser = (cookies_browser or "").strip() or None
 
-    src = Path(video if isinstance(video, str) else video)
-    if not src.is_file():
-        raise gr.Error("Could not read the uploaded file.")
+    if url:
+        if not looks_like_url(url):
+            raise gr.Error("That doesn't look like a valid URL. Paste a full YouTube link.")
+        progress(0.05, desc="Downloading from YouTube…")
+        try:
+            src = resolve_input(
+                url,
+                download_dir=out_dir / "download",
+                cookies_from_browser=browser,
+            )
+        except (ValueError, RuntimeError, FileNotFoundError) as exc:
+            raise gr.Error(str(exc)) from exc
+    elif video is not None:
+        src = Path(video if isinstance(video, str) else video)
+        if not src.is_file():
+            raise gr.Error("Could not read the uploaded file.")
+    else:
+        raise gr.Error("Upload a game video or paste a YouTube link.")
 
-    progress(0.1, desc="Scanning motion between plays…")
+    progress(0.25, desc="Scanning motion between plays…")
     options = DetectOptions(
         sensitivity=float(sensitivity),
         pad_before_sec=float(pad_before),
@@ -67,7 +86,6 @@ def _process(
         merge_gap_sec=float(merge_gap),
     )
 
-    out_dir = Path(tempfile.mkdtemp(prefix="vb-trim-ui-"))
     out_path = out_dir / f"{src.stem}_rallies.mp4"
     edl_path = out_dir / f"{src.stem}_segments.csv"
 
@@ -86,6 +104,8 @@ def _process(
 
     progress(0.95, desc="Finishing…")
     report = summarize_result(result)
+    if url:
+        report = f"Source: {url}\nDownloaded: {src.name}\n\n" + report
     return str(written) if written else None, report, str(edl_path)
 
 
@@ -95,13 +115,25 @@ def build_ui() -> gr.Blocks:
             gr.Markdown(
                 """
 # Rally Cut
-Drop a full volleyball game film. We keep the rallies and cut the standing-around
-time between serves — so film study starts at the toss, not the huddle.
+Drop a full volleyball game film — or paste a YouTube link. We keep the rallies
+and cut the standing-around time between serves.
                 """
             )
 
         with gr.Row():
-            video_in = gr.Video(label="Game film", sources=["upload"])
+            with gr.Column():
+                video_in = gr.Video(label="Game film (upload)", sources=["upload"])
+                youtube_url = gr.Textbox(
+                    label="Or paste a YouTube link",
+                    placeholder="https://www.youtube.com/watch?v=…",
+                    lines=1,
+                )
+                cookies_browser = gr.Dropdown(
+                    label="YouTube cookies (if download is blocked)",
+                    choices=["", "chrome", "firefox", "edge", "brave", "chromium", "safari"],
+                    value="",
+                    info="Only needed when YouTube asks to sign in / confirm you’re not a bot.",
+                )
             video_out = gr.Video(label="Rally-only output", interactive=False)
 
         with gr.Accordion("Tuning", open=False):
@@ -127,14 +159,23 @@ time between serves — so film study starts at the toss, not the huddle.
         gr.Markdown(
             """
 Works best on **sideline / end-line film** with a mostly steady camera.
-It scores player/ball motion after removing camera pans, then stitches high-motion
-stretches (with a little padding for the serve) into one watchable file.
+If both an upload and a YouTube link are provided, the link is used.
+YouTube downloads may take a minute for longer match films.
             """
         )
 
         run_btn.click(
             fn=_process,
-            inputs=[video_in, sensitivity, pad_before, pad_after, min_rally, merge_gap],
+            inputs=[
+                video_in,
+                youtube_url,
+                cookies_browser,
+                sensitivity,
+                pad_before,
+                pad_after,
+                min_rally,
+                merge_gap,
+            ],
             outputs=[video_out, report, edl],
         )
     return demo
