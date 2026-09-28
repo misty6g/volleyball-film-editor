@@ -47,6 +47,7 @@ def _process(
     video,
     youtube_url: str,
     cookies_browser: str,
+    cookies_upload,
     sensitivity: float,
     pad_before: float,
     pad_after: float,
@@ -57,6 +58,13 @@ def _process(
     url = (youtube_url or "").strip()
     out_dir = Path(tempfile.mkdtemp(prefix="vb-trim-ui-"))
     browser = (cookies_browser or "").strip() or None
+    cookies_file = None
+    if cookies_upload is not None:
+        cookies_file = Path(
+            cookies_upload if isinstance(cookies_upload, str) else cookies_upload
+        )
+        if not cookies_file.is_file():
+            raise gr.Error("Could not read the uploaded cookies.txt file.")
 
     if url:
         if not looks_like_url(url):
@@ -66,7 +74,10 @@ def _process(
             src = resolve_input(
                 url,
                 download_dir=out_dir / "download",
-                cookies_from_browser=browser,
+                # Prefer an exported cookies.txt when both are provided — it
+                # avoids Chrome's locked cookie DB while the browser is open.
+                cookies_from_browser=None if cookies_file else browser,
+                cookies_file=cookies_file,
             )
         except (ValueError, RuntimeError, FileNotFoundError) as exc:
             raise gr.Error(str(exc)) from exc
@@ -129,10 +140,22 @@ and cut the standing-around time between serves.
                     lines=1,
                 )
                 cookies_browser = gr.Dropdown(
-                    label="YouTube cookies (if download is blocked)",
+                    label="Browser cookies for YouTube",
                     choices=["", "chrome", "firefox", "edge", "brave", "chromium", "safari"],
                     value="",
-                    info="Only needed when YouTube asks to sign in / confirm you’re not a bot.",
+                    info=(
+                        "Fully quit Chrome (not just close the tab) before selecting "
+                        "chrome — otherwise the cookie DB stays locked and formats fail."
+                    ),
+                )
+                cookies_upload = gr.File(
+                    label="Or upload cookies.txt (backup)",
+                    file_types=[".txt"],
+                    type="filepath",
+                    info=(
+                        "Export with a cookies.txt extension, then upload here. "
+                        "Use this if Chrome cookies still fail while Chrome is open."
+                    ),
                 )
             video_out = gr.Video(label="Rally-only output", interactive=False)
 
@@ -170,6 +193,7 @@ YouTube downloads may take a minute for longer match films.
                 video_in,
                 youtube_url,
                 cookies_browser,
+                cookies_upload,
                 sensitivity,
                 pad_before,
                 pad_after,
