@@ -211,11 +211,43 @@ YouTube downloads may take a minute for longer match films.
     return demo
 
 
+def _find_free_port(preferred: int, *, attempts: int = 40) -> int:
+    """Return preferred if free, otherwise the next open TCP port."""
+    import socket
+
+    for port in range(preferred, preferred + attempts):
+        # Prefer connect check: detects an already-listening server reliably.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            in_use = probe.connect_ex(("127.0.0.1", port)) == 0
+        if in_use:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            # No SO_REUSEADDR — we want bind to fail if the port is taken.
+            try:
+                sock.bind(("0.0.0.0", port))
+            except OSError:
+                continue
+            return port
+    raise OSError(
+        f"No free port found in {preferred}–{preferred + attempts - 1}. "
+        f"Stop the other Rally Cut / Gradio process, or pass --port PORT."
+    )
+
+
 def launch(port: int = 8765, share: bool = False) -> None:
     demo = build_ui()
+    chosen = _find_free_port(port)
+    if chosen != port:
+        print(
+            f"Port {port} is busy — launching on http://127.0.0.1:{chosen} instead.",
+            flush=True,
+        )
+    else:
+        print(f"Open http://127.0.0.1:{chosen}", flush=True)
     demo.launch(
         server_name="0.0.0.0",
-        server_port=port,
+        server_port=chosen,
         share=share,
         show_error=True,
         css=CUSTOM_CSS,
