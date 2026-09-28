@@ -19,7 +19,7 @@ uv sync
 uv run volleyball-trim --ui
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Upload a game video **or** paste a YouTube link, then click **Trim downtime**.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765) (or the next free port if 8765 is busy). Upload a game video **or** paste a YouTube link, then click **Trim downtime**.
 
 Or with pip:
 
