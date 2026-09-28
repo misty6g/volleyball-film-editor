@@ -149,13 +149,11 @@ and cut the standing-around time between serves.
                     ),
                 )
                 cookies_upload = gr.File(
-                    label="Or upload cookies.txt (backup)",
+                    label=(
+                        "Or upload cookies.txt (backup — use if Chrome is still open)"
+                    ),
                     file_types=[".txt"],
                     type="filepath",
-                    info=(
-                        "Export with a cookies.txt extension, then upload here. "
-                        "Use this if Chrome cookies still fail while Chrome is open."
-                    ),
                 )
             video_out = gr.Video(label="Rally-only output", interactive=False)
 
