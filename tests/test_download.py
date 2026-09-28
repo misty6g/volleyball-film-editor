@@ -50,7 +50,7 @@ def test_download_bot_check_message(monkeypatch, tmp_path: Path) -> None:
 
         def extract_info(self, url, download=True):
             raise Exception(
-                "ERROR: [youtube] abc: Sign in to confirm you're not a bot."
+                "ERROR: [youtube] abc: Sign in to confirm you’re not a bot."
             )
 
     import sys
@@ -62,7 +62,7 @@ def test_download_bot_check_message(monkeypatch, tmp_path: Path) -> None:
 
     from volleyball_trim.download import download_video
 
-    with pytest.raises(RuntimeError, match="browser cookies"):
+    with pytest.raises(RuntimeError, match="bot check"):
         download_video("https://www.youtube.com/watch?v=abc123", dest_dir=tmp_path)
 
 
@@ -106,7 +106,83 @@ def test_download_retries_when_format_unavailable(monkeypatch, tmp_path: Path) -
     path = download_video("https://youtu.be/W4rwOIwHLHI", dest_dir=tmp_path)
     assert path.is_file()
     assert len(calls) == 2
-    assert calls[1] == "bv*+ba/b"
+    assert calls[0].startswith("bv*")
+    assert calls[1] == "bestvideo*+bestaudio/best"
+
+
+def test_download_format_exhausted_message(monkeypatch, tmp_path: Path) -> None:
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            raise Exception(
+                "ERROR: [youtube] W4rwOIwHLHI: Requested format is not available."
+            )
+
+    import sys
+    import types
+
+    fake = types.ModuleType("yt_dlp")
+    fake.YoutubeDL = FakeYDL
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake)
+
+    from volleyball_trim.download import download_video
+
+    with pytest.raises(RuntimeError, match="quit Chrome"):
+        download_video(
+            "https://youtu.be/W4rwOIwHLHI",
+            dest_dir=tmp_path,
+            cookies_from_browser="chrome",
+        )
+
+
+def test_download_uses_web_clients_with_cookies(monkeypatch, tmp_path: Path) -> None:
+    seen: list[dict] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen.append(opts)
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            out = tmp_path / "match [abc].mp4"
+            out.write_bytes(b"fake-video")
+            return {"id": "abc", "title": "match", "ext": "mp4"}
+
+        def prepare_filename(self, info):
+            return str(tmp_path / "match [abc].mp4")
+
+    import sys
+    import types
+
+    fake = types.ModuleType("yt_dlp")
+    fake.YoutubeDL = FakeYDL
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake)
+
+    from volleyball_trim.download import download_video
+
+    download_video(
+        "https://youtu.be/abc",
+        dest_dir=tmp_path,
+        cookies_from_browser="chrome",
+    )
+    assert seen[0]["cookiesfrombrowser"] == ("chrome",)
+    clients = seen[0]["extractor_args"]["youtube"]["player_client"]
+    assert "web" in clients
+    assert "android" not in clients
 
 
 def test_clean_error_strips_ansi() -> None:
