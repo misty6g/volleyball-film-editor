@@ -13,11 +13,20 @@ It scores **residual motion** (player/ball movement after removing camera pans),
 ## Quick start
 
 ```bash
+git clone https://github.com/misty6g/volleyball-film-editor.git
+cd volleyball-film-editor
 uv sync
 uv run volleyball-trim --ui
 ```
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765), upload a game video, click **Trim downtime**.
+
+Or with pip:
+
+```bash
+pip install -r requirements.txt
+python -m volleyball_trim.cli --ui
+```
 
 ### CLI
 
