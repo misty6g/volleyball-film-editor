@@ -69,7 +69,13 @@ def _process(
     if url:
         if not looks_like_url(url):
             raise gr.Error("That doesn't look like a valid URL. Paste a full YouTube link.")
-        progress(0.05, desc="Downloading from YouTube…")
+        progress(0.02, desc="Resolving YouTube formats…")
+
+        # Map yt-dlp's 0..1 stream progress into the UI's download phase (~2–24%).
+        def _on_download(frac: float, message: str) -> None:
+            overall = 0.02 + 0.22 * max(0.0, min(1.0, frac))
+            progress(overall, desc=message)
+
         try:
             src = resolve_input(
                 url,
@@ -78,17 +84,19 @@ def _process(
                 # avoids Chrome's locked cookie DB while the browser is open.
                 cookies_from_browser=None if cookies_file else browser,
                 cookies_file=cookies_file,
+                on_progress=_on_download,
             )
         except (ValueError, RuntimeError, FileNotFoundError) as exc:
             raise gr.Error(str(exc)) from exc
+        progress(0.25, desc="Download complete — scanning motion…")
     elif video is not None:
         src = Path(video if isinstance(video, str) else video)
         if not src.is_file():
             raise gr.Error("Could not read the uploaded file.")
+        progress(0.25, desc="Scanning motion between plays…")
     else:
         raise gr.Error("Upload a game video or paste a YouTube link.")
 
-    progress(0.25, desc="Scanning motion between plays…")
     options = DetectOptions(
         sensitivity=float(sensitivity),
         pad_before_sec=float(pad_before),
