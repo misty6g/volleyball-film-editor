@@ -190,3 +190,68 @@ def test_clean_error_strips_ansi() -> None:
 
     raw = "\x1b[0;31mERROR:\x1b[0m [youtube] abc: Requested format is not available"
     assert _clean_error(raw) == "ERROR: [youtube] abc: Requested format is not available"
+
+
+def test_fraction_from_hook() -> None:
+    from volleyball_trim.download import _fraction_from_hook
+
+    assert _fraction_from_hook(
+        {"downloaded_bytes": 50, "total_bytes": 200}
+    ) == pytest.approx(0.25)
+    assert _fraction_from_hook({"_percent_str": "\x1b[0;31m42.5%\x1b[0m"}) == pytest.approx(
+        0.425
+    )
+    assert _fraction_from_hook({}) is None
+
+
+def test_download_reports_progress(monkeypatch, tmp_path: Path) -> None:
+    events: list[tuple[float, str]] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+            self._hooks = list(opts.get("progress_hooks") or [])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            assert self._hooks, "progress_hooks should be registered"
+            for hook in self._hooks:
+                hook(
+                    {
+                        "status": "downloading",
+                        "downloaded_bytes": 40,
+                        "total_bytes": 100,
+                        "filename": str(tmp_path / "clip.mp4"),
+                    }
+                )
+                hook({"status": "finished", "filename": str(tmp_path / "clip.mp4")})
+            out = tmp_path / "match [abc].mp4"
+            out.write_bytes(b"fake-video")
+            return {"id": "abc", "title": "match", "ext": "mp4"}
+
+        def prepare_filename(self, info):
+            return str(tmp_path / "match [abc].mp4")
+
+    import sys
+    import types
+
+    fake = types.ModuleType("yt_dlp")
+    fake.YoutubeDL = FakeYDL
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake)
+
+    from volleyball_trim.download import download_video
+
+    download_video(
+        "https://youtu.be/abc",
+        dest_dir=tmp_path,
+        on_progress=lambda frac, msg: events.append((frac, msg)),
+    )
+    assert events[0] == (0.0, "Resolving YouTube formats…")
+    assert any(abs(f - 0.4) < 1e-6 and "40%" in m for f, m in events)
+    assert events[-1][0] == 1.0
+    assert "complete" in events[-1][1].lower()
