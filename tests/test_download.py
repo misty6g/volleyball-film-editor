@@ -50,13 +50,9 @@ def test_download_bot_check_message(monkeypatch, tmp_path: Path) -> None:
 
         def extract_info(self, url, download=True):
             raise Exception(
-                "ERROR: [youtube] abc: Sign in to confirm you’re not a bot."
+                "ERROR: [youtube] abc: Sign in to confirm you're not a bot."
             )
 
-    import volleyball_trim.download as download_mod
-
-    monkeypatch.setattr(download_mod, "YoutubeDL", FakeYDL, raising=False)
-    # Patch the import inside download_video
     import sys
     import types
 
@@ -68,3 +64,53 @@ def test_download_bot_check_message(monkeypatch, tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="browser cookies"):
         download_video("https://www.youtube.com/watch?v=abc123", dest_dir=tmp_path)
+
+
+def test_download_retries_when_format_unavailable(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            calls.append(self.opts["format"])
+            if len(calls) == 1:
+                raise Exception(
+                    "\x1b[0;31mERROR:\x1b[0m [youtube] W4rwOIwHLHI: "
+                    "Requested format is not available. Use --list-formats"
+                )
+            # Second attempt succeeds.
+            out = tmp_path / "match [W4rwOIwHLHI].mp4"
+            out.write_bytes(b"fake-video")
+            return {"id": "W4rwOIwHLHI", "title": "match", "ext": "mp4"}
+
+        def prepare_filename(self, info):
+            return str(tmp_path / "match [W4rwOIwHLHI].mp4")
+
+    import sys
+    import types
+
+    fake = types.ModuleType("yt_dlp")
+    fake.YoutubeDL = FakeYDL
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake)
+
+    from volleyball_trim.download import download_video
+
+    path = download_video("https://youtu.be/W4rwOIwHLHI", dest_dir=tmp_path)
+    assert path.is_file()
+    assert len(calls) == 2
+    assert calls[1] == "bv*+ba/b"
+
+
+def test_clean_error_strips_ansi() -> None:
+    from volleyball_trim.download import _clean_error
+
+    raw = "\x1b[0;31mERROR:\x1b[0m [youtube] abc: Requested format is not available"
+    assert _clean_error(raw) == "ERROR: [youtube] abc: Requested format is not available"

@@ -17,6 +17,12 @@ _URL_HOST_HINTS = (
 )
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\[[0-9;]*m")
+
+
+def _clean_error(message: str) -> str:
+    """Strip terminal color codes yt-dlp sometimes leaves in exceptions."""
+    return _ANSI_RE.sub("", message).strip()
 
 
 def looks_like_url(value: str | Path) -> bool:
@@ -34,12 +40,23 @@ def looks_like_url(value: str | Path) -> bool:
 
 def is_youtube_url(value: str | Path) -> bool:
     text = str(value).strip()
-    if not _URL_RE.match(text):
+    if not text or not _URL_RE.match(text):
         return False
     host = (urlparse(text).hostname or "").lower()
     return any(
         host == h or host.endswith("." + h)
         for h in ("youtube.com", "youtu.be", "youtube-nocookie.com")
+    )
+
+
+def _format_selector(max_height: int) -> str:
+    """Prefer ≤max_height mp4, but always fall back to whatever yt-dlp can get."""
+    return (
+        f"bv*[height<=?{max_height}][ext=mp4]+ba[ext=m4a]/"
+        f"b[height<=?{max_height}][ext=mp4]/"
+        f"bv*[height<=?{max_height}]+ba/"
+        f"b[height<=?{max_height}]/"
+        f"bv*+ba/b"
     )
 
 
@@ -54,10 +71,10 @@ def download_video(
     """Download a video URL to dest_dir and return the local file path.
 
     Prefers an mp4 mux under max_height when available so OpenCV/ffmpeg
-    can read it without exotic codecs.
+    can read it without exotic codecs; falls back to best available.
 
-    If YouTube asks to "Sign in to confirm you’re not a bot", pass browser
-    cookies via cookies_from_browser (e.g. \"chrome\") or cookies_file.
+    If YouTube asks to "Sign in to confirm you're not a bot", pass browser
+    cookies via cookies_from_browser (e.g. "chrome") or cookies_file.
     """
     try:
         from yt_dlp import YoutubeDL
@@ -76,16 +93,13 @@ def download_video(
         out_dir = Path(dest_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prefer mp4/h264 for broad compatibility; fall back to best available.
-    fmt = (
-        f"bv*[height<=?{max_height}][ext=mp4]+ba[ext=m4a]/"
-        f"b[height<=?{max_height}][ext=mp4]/"
-        f"bv*[height<=?{max_height}]+ba/b[height<=?{max_height}]/b"
-    )
     outtmpl = str(out_dir / "%(title).80B [%(id)s].%(ext)s")
+    has_cookies = bool(cookies_from_browser or cookies_file)
 
     opts: dict = {
-        "format": fmt,
+        "format": _format_selector(max_height),
+        # Prefer h264/mp4 when several formats match, without failing hard.
+        "format_sort": [f"res:{max_height}", "vcodec:h264", "acodec:m4a", "ext:mp4:m4a"],
         "outtmpl": outtmpl,
         "noplaylist": True,
         "quiet": True,
@@ -94,11 +108,15 @@ def download_video(
         "fragment_retries": 3,
         "merge_output_format": "mp4",
         "restrictfilenames": True,
-        # Multiple clients improves odds against YouTube bot checks.
-        "extractor_args": {
-            "youtube": {"player_client": ["android", "ios", "web"]},
-        },
     }
+    # Cookies pair best with the web client; otherwise try mobile clients too.
+    if has_cookies:
+        opts["extractor_args"] = {"youtube": {"player_client": ["web", "android"]}}
+    else:
+        opts["extractor_args"] = {
+            "youtube": {"player_client": ["android", "ios", "web"]},
+        }
+
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (cookies_from_browser.strip().lower(),)
     if cookies_file:
@@ -107,47 +125,68 @@ def download_video(
             raise FileNotFoundError(f"Cookies file not found: {cookie_path}")
         opts["cookiefile"] = str(cookie_path)
 
-    try:
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                raise RuntimeError(f"Could not download: {url}")
-            # Playlists should be blocked by noplaylist; still guard.
-            if "entries" in info:
-                entries = [e for e in info["entries"] if e]
-                if not entries:
-                    raise RuntimeError(f"No video found at URL: {url}")
-                info = entries[0]
-            prepared = ydl.prepare_filename(info)
-            # merge_output_format may change extension to mp4 after remux.
-            candidate = Path(prepared)
-            if not candidate.is_file():
-                mp4 = candidate.with_suffix(".mp4")
-                if mp4.is_file():
-                    candidate = mp4
-                else:
-                    # Fall back to newest file in dest dir.
-                    files = sorted(
-                        out_dir.iterdir(),
-                        key=lambda p: p.stat().st_mtime,
-                        reverse=True,
-                    )
-                    files = [f for f in files if f.is_file()]
-                    if not files:
-                        raise RuntimeError(f"Download finished but no file found for: {url}")
-                    candidate = files[0]
-            return candidate.resolve()
-    except Exception as exc:
-        msg = str(exc).strip() or exc.__class__.__name__
-        if "Sign in to confirm" in msg or "not a bot" in msg.lower():
-            raise RuntimeError(
-                "YouTube blocked the download (bot check). "
-                "Pass browser cookies, e.g. "
-                "`--cookies-from-browser chrome` "
-                "or export cookies to a file and use `--cookies cookies.txt`. "
-                f"Details: {msg}"
-            ) from exc
-        raise RuntimeError(f"Download failed: {msg}") from exc
+    last_error: Exception | None = None
+    # First try preferred formats; on "format not available" retry with absolute best.
+    attempts = [
+        opts,
+        {**opts, "format": "bv*+ba/b", "format_sort": ["res", "br"]},
+    ]
+
+    for attempt_opts in attempts:
+        try:
+            with YoutubeDL(attempt_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    raise RuntimeError(f"Could not download: {url}")
+                if "entries" in info:
+                    entries = [e for e in info["entries"] if e]
+                    if not entries:
+                        raise RuntimeError(f"No video found at URL: {url}")
+                    info = entries[0]
+                prepared = ydl.prepare_filename(info)
+                candidate = Path(prepared)
+                if not candidate.is_file():
+                    mp4 = candidate.with_suffix(".mp4")
+                    if mp4.is_file():
+                        candidate = mp4
+                    else:
+                        files = sorted(
+                            (f for f in out_dir.iterdir() if f.is_file()),
+                            key=lambda p: p.stat().st_mtime,
+                            reverse=True,
+                        )
+                        if not files:
+                            raise RuntimeError(
+                                f"Download finished but no file found for: {url}"
+                            )
+                        candidate = files[0]
+                return candidate.resolve()
+        except Exception as exc:
+            last_error = exc
+            msg = _clean_error(str(exc))
+            # Retry once when the preferred format set isn't offered for this video.
+            if "Requested format is not available" in msg and attempt_opts is attempts[0]:
+                continue
+            break
+
+    assert last_error is not None
+    msg = _clean_error(str(last_error)) or last_error.__class__.__name__
+    if "Sign in to confirm" in msg or "not a bot" in msg.lower():
+        raise RuntimeError(
+            "YouTube blocked the download (bot check). "
+            "Pass browser cookies, e.g. "
+            "`--cookies-from-browser chrome` "
+            "or export cookies to a file and use `--cookies cookies.txt`. "
+            f"Details: {msg}"
+        ) from last_error
+    if "Requested format is not available" in msg:
+        raise RuntimeError(
+            "YouTube did not offer a usable video format for this link. "
+            "Try again with `--cookies-from-browser chrome`, or download "
+            "the file manually and upload it instead. "
+            f"Details: {msg}"
+        ) from last_error
+    raise RuntimeError(f"Download failed: {msg}") from last_error
 
 
 def resolve_input(
