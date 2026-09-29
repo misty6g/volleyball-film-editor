@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from volleyball_trim.detect import DetectOptions
+from volleyball_trim.detect import CourtRoi, DetectOptions
 from volleyball_trim.download import looks_like_url, resolve_input
 from volleyball_trim.pipeline import process_and_report
 
@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="volleyball-trim",
         description=(
             "Trim downtime between volleyball serves. "
-            "Keeps rallies (high residual motion) and drops standing/reset time. "
+            "Keeps rallies (spatial court motion) and drops standing/reset time. "
             "Accepts a local video file or a YouTube URL."
         ),
     )
@@ -106,6 +106,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Netscape cookies.txt for YouTube downloads (if bot-checked)",
     )
+    p.add_argument(
+        "--roi-top",
+        type=float,
+        default=0.12,
+        help="Fraction of frame height to ignore at top (scorebug; default: 0.12)",
+    )
+    p.add_argument(
+        "--roi-bottom",
+        type=float,
+        default=0.08,
+        help="Fraction of frame height to ignore at bottom (default: 0.08)",
+    )
+    p.add_argument(
+        "--no-person-prior",
+        action="store_true",
+        help="Disable HOG person-prior weighting",
+    )
+    p.add_argument(
+        "--no-serve-aware",
+        action="store_true",
+        help="Disable serve-toss lead-in snapping (use fixed --pad-before)",
+    )
     return p
 
 
@@ -152,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
         merge_gap_sec=args.merge_gap,
         pad_before_sec=args.pad_before,
         pad_after_sec=args.pad_after,
+        court_roi=CourtRoi(top=args.roi_top, bottom=args.roi_bottom),
+        use_person_prior=not args.no_person_prior,
+        serve_aware_pads=not args.no_serve_aware,
     )
 
     try:
