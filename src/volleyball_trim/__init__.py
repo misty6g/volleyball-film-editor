@@ -1,10 +1,11 @@
 """Volleyball film trimmer — cut downtime between serves."""
 
-from volleyball_trim.detect import DetectOptions, Segment, detect_rallies
+from volleyball_trim.detect import CourtRoi, DetectOptions, Segment, detect_rallies
 from volleyball_trim.download import download_video, resolve_input
 from volleyball_trim.pipeline import process_video
 
 __all__ = [
+    "CourtRoi",
     "DetectOptions",
     "Segment",
     "detect_rallies",
