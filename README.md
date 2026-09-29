@@ -2,7 +2,7 @@
 
 Trim the downtime between volleyball serves. Point it at a game film — or paste a YouTube link — and it keeps the rallies while cutting standing-around time between points.
 
-It scores **residual motion** (player/ball movement after removing camera pans), finds high-activity stretches, pads a little for the serve toss, and exports one MP4 with ffmpeg. YouTube (and similar) links are downloaded with [yt-dlp](https://github.com/yt-dlp/yt-dlp) before trimming.
+It scores **spatial residual motion inside a court ROI** (player/ball movement after removing camera pans, ignoring scorebug bands), optionally weights detections with a lightweight HOG person prior, snaps lead-ins to serve-toss onsets, and lets you **review/edit segments** before export.
 
 ## Requirements
 
@@ -19,7 +19,12 @@ uv sync
 uv run volleyball-trim --ui
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765) (or the next free port if 8765 is busy). Upload a game video **or** paste a YouTube link, then click **Trim downtime**.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765) (or the next free port if 8765 is busy).
+
+1. Upload a game video **or** paste a YouTube link  
+2. Click **Analyze rallies** — review the motion timeline  
+3. Edit keep segments (nudge start/end, delete rows)  
+4. Click **Export trimmed film**
 
 Or with pip:
 
@@ -31,46 +36,41 @@ python -m volleyball_trim.cli --ui
 ### CLI
 
 ```bash
-# Local file
+# Local file (one-shot detect + export)
 uv run volleyball-trim path/to/game.mp4 -o rallies.mp4
 
 # YouTube URL
 uv run volleyball-trim "https://www.youtube.com/watch?v=VIDEO_ID" -o rallies.mp4
 
-# If YouTube blocks the download (bot check), reuse your browser cookies.
-# Fully quit Chrome first — an open Chrome locks the cookie DB and often
-# leads to "Requested format is not available".
+# Cookies if YouTube bot-checks (fully quit Chrome first):
 uv run volleyball-trim "https://youtu.be/VIDEO_ID" -o rallies.mp4 --cookies-from-browser chrome
-
-# Or pass an exported Netscape cookies.txt (works while Chrome stays open):
-uv run volleyball-trim "https://youtu.be/VIDEO_ID" -o rallies.mp4 --cookies cookies.txt
 ```
-
-If Chrome cookies still fail with **Requested format is not available**, quit Chrome completely and retry, or upload/pass a `cookies.txt`. Having [Deno](https://deno.land) or Node.js installed also helps yt-dlp solve YouTube’s player JS.
 
 Useful flags:
 
 | Flag | Meaning |
 |------|---------|
 | `--sensitivity 0.7` | Keep more footage (raise if rallies get clipped) |
-| `--pad-before 1.5` | Seconds kept before each rally for the serve toss |
+| `--pad-before 1.5` | Max seconds before rally (serve-aware may snap earlier) |
 | `--pad-after 1.0` | Seconds kept after each rally |
-| `--cookies-from-browser chrome` | Use browser cookies for YouTube downloads |
-| `--cookies cookies.txt` | Netscape cookies file for YouTube |
-| `--dry-run` | Print detected segments without writing video |
-| `--edl segments.csv` | Also write a CSV of kept ranges |
-| `--ui` | Launch the web UI |
+| `--roi-top 0.12` | Ignore top scorebug band |
+| `--roi-bottom 0.08` | Ignore bottom band |
+| `--no-person-prior` | Disable HOG person weighting |
+| `--no-serve-aware` | Use fixed pad-before instead of toss snapping |
+| `--cookies-from-browser chrome` | Browser cookies for YouTube |
+| `--dry-run` | Print segments without writing video |
+| `--ui` | Launch the review UI |
 
 ## How it works
 
-1. If the input is a URL, download it with yt-dlp (mp4 preferred, ≤1080p).
-2. Sample frames a few times per second.
-3. Estimate camera translation and score the leftover motion.
-4. Treat stretches above an adaptive threshold as rallies.
-5. Merge nearby bursts, drop tiny blips, pad for serve/point end.
-6. Concatenate kept clips with ffmpeg (`libx264`).
+1. If the input is a URL, download it with yt-dlp.
+2. Sample frames a few times per second inside a **court ROI** (scorebug bands ignored).
+3. Estimate camera translation and score **spatial** residual motion (busiest court cells).
+4. Optionally weight motion with an OpenCV **HOG person prior**.
+5. Threshold → merge → **serve-aware** lead-in pads → segments.
+6. In the UI: review timeline, edit segments, then ffmpeg-export.
 
-Best results: **sideline or end-line film** with a mostly steady camera. Heavy zooming, scoreboard overlays that animate constantly, or very shaky handheld footage may need a higher sensitivity.
+Best results: **sideline or end-line film** with a mostly steady camera.
 
 ## Demo / tests
 
@@ -85,9 +85,9 @@ uv run pytest
 ```
 src/volleyball_trim/
   download.py   # YouTube / URL download (yt-dlp)
-  detect.py     # motion / rally detection
+  detect.py     # court ROI, spatial motion, serve pads, HOG prior
   trim.py       # ffmpeg export
   pipeline.py   # detect → export
   cli.py        # command line
-  app.py        # Gradio UI
+  app.py        # Gradio review UI
 ```
